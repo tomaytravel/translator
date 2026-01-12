@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini Smart Reader</title>
+    <title>Gemini Smart Tab Reader</title>
     <style>
         :root { --bg: #f5f5f7; --paper: #fff; --text: #333; --primary: #007aff; --danger: #ff3b30; }
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Pretendard", sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
@@ -38,7 +38,7 @@
         .btn-red { background: var(--danger); }
         .btn-green { background: #34c759; }
         .btn-gray { background: #8e8e93; }
-        .btn-popup { background: #5856d6; } /* 팝업 버튼 */
+        .btn-blue { background: #007aff; }
 
         #loadFile { display: none; }
 
@@ -70,7 +70,7 @@
 <body>
 
 <header>
-    <div class="brand"><span>📚</span> SmartBook</div>
+    <div class="brand"><span>📚</span> SmartTab</div>
     
     <input type="password" id="apiKeyInput" placeholder="API Key" autocomplete="new-password">
     <button class="btn-yellow" onclick="fetchModels()">1. 모델</button>
@@ -79,7 +79,7 @@
     <div style="width:1px; height:20px; background:#e5e5ea; margin:0 5px;"></div>
     
     <input type="text" id="urlInput" placeholder="소설 URL 입력" value="https://kakuyomu.jp/works/4852201425154963487/episodes/4852201425154963490">
-    <button onclick="openPopup()" class="btn-popup">🌏 원문 팝업</button>
+    <button onclick="openTab()" class="btn-blue">🌏 새 탭으로 열기</button>
     
     <div style="width:1px; height:20px; background:#e5e5ea; margin:0 5px;"></div>
 
@@ -100,9 +100,9 @@
         <div id="setupBox">
             <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
                 <h3 style="margin:0; font-size:16px; color:#333;">📋 빠른 시작</h3>
-                <span style="font-size:12px; color:#5856d6; font-weight:bold;">팝업에서 북마크를 누르면 자동 시작됩니다!</span>
+                <span style="font-size:12px; color:#007aff; font-weight:bold;">새 탭에서 북마크를 누르면 이 창으로 돌아옵니다!</span>
             </div>
-            <input type="text" id="episodeTitle" placeholder="소제목 (예: 제1화) - 비워두면 자동 입력" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #d2d2d7; border-radius:6px; box-sizing:border-box; font-weight:bold;">
+            <input type="text" id="episodeTitle" placeholder="소제목 (예: 제1화)" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #d2d2d7; border-radius:6px; box-sizing:border-box; font-weight:bold;">
             <textarea id="inputArea" placeholder="수동으로 붙여넣고 싶다면 여기에..."></textarea>
             <button onclick="manualStart()" id="manualBtn" style="margin-top:10px; width:100%;">수동 번역 시작</button>
             <button onclick="stopBatch()" id="stopBtn" class="btn-red" style="display:none; margin-top:10px; width:100%;">중지</button>
@@ -111,10 +111,10 @@
         <div id="contentArea" class="novel-text">
             <div id="emptyMsg" style="text-align:center; color:#86868b; margin-top:50px;">
                 <div style="font-size:40px; margin-bottom:20px; opacity:0.3;">🚀</div>
-                <b>스마트 연동 대기 중</b><br><br>
-                1. 상단의 <b>[🌏 원문 팝업]</b> 버튼을 누르세요.<br>
-                2. 팝업 창에서 <b>북마크 버튼</b>을 누르세요.<br>
-                3. 번역이 <b>자동으로 시작</b>됩니다.
+                <b>스마트 탭 연동 대기 중</b><br><br>
+                1. 상단의 <b>[🌏 새 탭으로 열기]</b> 버튼을 누르세요.<br>
+                2. 열린 탭에서 <b>북마크 버튼</b>을 누르세요.<br>
+                3. 탭이 닫히고 번역이 시작됩니다.
             </div>
         </div>
     </div>
@@ -122,53 +122,43 @@
 
 <script>
     const CHUNK_SIZE = 2500;
-    const STORAGE_KEY = "gemini_smart_book";
+    const STORAGE_KEY = "gemini_smart_tab_book";
     let state = { chunks: [], currentIndex: 0, isTranslating: false };
 
-    // --- 0. 스마트 팝업 연동 시스템 (핵심) ---
+    // --- 0. 스마트 탭 연동 시스템 ---
     
-    // 메시지 수신 리스너 (팝업에서 보낸 텍스트 받기)
     window.addEventListener('message', function(event) {
-        // 보안상 데이터 타입 확인
         if (event.data && event.data.type === 'NOVEL_TEXT') {
             const text = event.data.text;
             if(!text) return;
             
-            console.log("텍스트 수신 완료!");
-            
-            // 1. 입력창에 채우기
+            // 입력창 채우기
             document.getElementById('inputArea').value = text;
             
-            // 2. 소제목 자동 생성 (현재 시간 or 순서)
+            // 소제목 자동 생성
             const count = document.querySelectorAll('.episode-title').length + 1;
-            document.getElementById('episodeTitle').value = `제${count}화 (자동 수신됨)`;
+            document.getElementById('episodeTitle').value = `제${count}화 (수신됨)`;
 
-            // 3. 번역 즉시 시작 (원클릭 효과)
+            // 번역 시작
             manualStart();
-            
-            // 4. 알림
-            updateStatus("⚡ 팝업 데이터 수신! 번역 시작", false);
+            updateStatus("⚡ 데이터 수신! 번역 시작", false);
         }
     });
 
-    // 팝업 열기 함수
-    function openPopup() {
+    // [수정됨] 팝업 대신 새 탭으로 열기
+    function openTab() {
         const url = document.getElementById('urlInput').value.trim();
         if(!url) return alert("URL을 입력하세요.");
         
-        // 팝업 창 크기와 위치 지정 (오른쪽 절반)
-        const w = 600;
-        const h = 800;
-        const left = window.screen.width - w;
-        const top = 0;
+        // _blank를 사용하여 새 탭으로 엽니다. (북마크 바 보임!)
+        window.open(url, '_blank');
         
-        window.open(url, 'TargetWindow', `width=${w},height=${h},top=${top},left=${left},scrollbars=yes,resizable=yes`);
-        
-        alert("팝업이 열리면, 그 창에서 '북마크'를 클릭하세요.\n그러면 자동으로 번역이 시작됩니다!");
+        // 안내
+        // alert("새 탭이 열립니다.\n거기서 북마크를 누르면 자동으로 닫히고 번역됩니다.");
     }
 
 
-    // --- 1. 저장 시스템 ---
+    // --- 1. 저장 및 번역 로직 (기존 동일) ---
     function updateStatus(msg, isError) {
         const el = document.getElementById('saveStatus');
         el.innerText = msg;
@@ -195,11 +185,11 @@
 
     function exportData() {
         const content = document.getElementById('contentArea').innerHTML;
-        if(!content || content.includes("스마트 연동")) return alert("내용 없음");
+        if(!content || content.includes("스마트 탭")) return alert("내용 없음");
         const blob = new Blob([`<!DOCTYPE html><html><body><div id="backup">${content}</div></body></html>`], {type: "text/html"});
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = `Book_${new Date().toISOString().slice(0,10)}.html`;
+        a.download = `Backup_${new Date().toISOString().slice(0,10)}.html`;
         a.click();
     }
 
@@ -225,7 +215,6 @@
         }
     }
 
-    // --- 번역 로직 ---
     async function fetchModels() {
         const key = document.getElementById('apiKeyInput').value.trim();
         const select = document.getElementById('modelSelect');
@@ -332,9 +321,6 @@
         document.getElementById('manualBtn').style.display = 'inline-block';
         document.getElementById('inputArea').value = "";
         document.getElementById('episodeTitle').value = "";
-        
-        // 팝업 닫기 시도 (북마크릿에서 안 닫혔을 경우)
-        // window.close()는 스크립트로 연 창만 닫을 수 있음.
     }
 
     function stopBatch() {
