@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini Book Maker (Offline Check)</title>
+    <title>Gemini Smart Reader</title>
     <style>
         :root { --bg: #f5f5f7; --paper: #fff; --text: #333; --primary: #007aff; --danger: #ff3b30; }
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Pretendard", sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
@@ -29,13 +29,16 @@
         input:focus { border-color: var(--primary); }
         #apiKeyInput { width: 120px; }
         #modelSelect { width: 160px; background: #f2f2f7; color: #007aff; font-weight: 600; }
+        #urlInput { flex-grow: 1; min-width: 150px; }
 
         button { padding: 8px 12px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; color: white; background: var(--primary); font-size: 13px; transition: 0.2s; white-space: nowrap; }
         button:hover { opacity: 0.9; }
+        
         .btn-yellow { background: #ffcc00; color: #1d1d1f; }
         .btn-red { background: var(--danger); }
         .btn-green { background: #34c759; }
         .btn-gray { background: #8e8e93; }
+        .btn-popup { background: #5856d6; } /* 팝업 버튼 */
 
         #loadFile { display: none; }
 
@@ -59,7 +62,6 @@
         #progressBar { height: 100%; background: #34c759; width: 0%; transition: width 0.3s; }
         .typing-loader { display: inline-block; color: #86868b; font-size: 13px; margin: 20px 0; }
         
-        /* 상태 표시등 스타일 */
         #saveStatus { font-size: 11px; font-weight: bold; margin-left: auto; padding: 4px 8px; border-radius: 4px; }
         .status-ok { color: #34c759; background: #e8faea; }
         .status-warn { color: #ff3b30; background: #ffe5e5; }
@@ -68,27 +70,27 @@
 <body>
 
 <header>
-    <div class="brand"><span>📚</span> SafeBook</div>
+    <div class="brand"><span>📚</span> SmartBook</div>
     
     <input type="password" id="apiKeyInput" placeholder="API Key" autocomplete="new-password">
     <button class="btn-yellow" onclick="fetchModels()">1. 모델</button>
     <select id="modelSelect"><option>◀ 검색</option></select>
     
     <div style="width:1px; height:20px; background:#e5e5ea; margin:0 5px;"></div>
-
-    <button onclick="startTranslation()" id="startBtn">2. 번역 ▶</button>
-    <button onclick="stopBatch()" id="stopBtn" class="btn-red" style="display:none;">중지</button>
+    
+    <input type="text" id="urlInput" placeholder="소설 URL 입력" value="https://kakuyomu.jp/works/4852201425154963487/episodes/4852201425154963490">
+    <button onclick="openPopup()" class="btn-popup">🌏 원문 팝업</button>
     
     <div style="width:1px; height:20px; background:#e5e5ea; margin:0 5px;"></div>
 
     <input type="file" id="loadFile" accept=".html" onchange="importData(this)">
-    <button onclick="document.getElementById('loadFile').click()" class="btn-gray" title="백업 불러오기">📂 로드</button>
-    <button onclick="exportData()" class="btn-gray" title="백업 저장하기">💾 백업</button>
+    <button onclick="document.getElementById('loadFile').click()" class="btn-gray" title="백업 불러오기">📂</button>
+    <button onclick="exportData()" class="btn-gray" title="백업 저장하기">💾</button>
     
     <button onclick="printToPdf()" class="btn-green">🖨️ PDF</button>
-    <button onclick="resetBook()" class="btn-red">🗑️ 초기화</button>
+    <button onclick="resetBook()" class="btn-red">🗑️</button>
 
-    <div id="saveStatus" class="status-ok">상태 확인 중...</div>
+    <div id="saveStatus" class="status-ok">대기</div>
 </header>
 
 <div id="progressBarContainer"><div id="progressBar"></div></div>
@@ -97,19 +99,22 @@
     <div id="paper">
         <div id="setupBox">
             <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
-                <h3 style="margin:0; font-size:16px; color:#333;">➕ 에피소드 추가</h3>
-                <span style="font-size:12px; color:#666;">복사한 본문을 붙여넣으세요</span>
+                <h3 style="margin:0; font-size:16px; color:#333;">📋 빠른 시작</h3>
+                <span style="font-size:12px; color:#5856d6; font-weight:bold;">팝업에서 북마크를 누르면 자동 시작됩니다!</span>
             </div>
-            <input type="text" id="episodeTitle" placeholder="소제목 (예: 제1화)" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #d2d2d7; border-radius:6px; box-sizing:border-box; font-weight:bold;">
-            <textarea id="inputArea" placeholder="본문 붙여넣기 (Ctrl+V)"></textarea>
+            <input type="text" id="episodeTitle" placeholder="소제목 (예: 제1화) - 비워두면 자동 입력" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #d2d2d7; border-radius:6px; box-sizing:border-box; font-weight:bold;">
+            <textarea id="inputArea" placeholder="수동으로 붙여넣고 싶다면 여기에..."></textarea>
+            <button onclick="manualStart()" id="manualBtn" style="margin-top:10px; width:100%;">수동 번역 시작</button>
+            <button onclick="stopBatch()" id="stopBtn" class="btn-red" style="display:none; margin-top:10px; width:100%;">중지</button>
         </div>
 
         <div id="contentArea" class="novel-text">
             <div id="emptyMsg" style="text-align:center; color:#86868b; margin-top:50px;">
-                <div style="font-size:40px; margin-bottom:20px; opacity:0.3;">📂</div>
-                <b>데이터가 비어있습니다.</b><br><br>
-                1. 텍스트를 넣고 번역하면 저장됩니다.<br>
-                2. 우측 상단 상태가 <b style="color:red">빨간색</b>이면 반드시 <b>[💾 백업]</b>을 누르세요.
+                <div style="font-size:40px; margin-bottom:20px; opacity:0.3;">🚀</div>
+                <b>스마트 연동 대기 중</b><br><br>
+                1. 상단의 <b>[🌏 원문 팝업]</b> 버튼을 누르세요.<br>
+                2. 팝업 창에서 <b>북마크 버튼</b>을 누르세요.<br>
+                3. 번역이 <b>자동으로 시작</b>됩니다.
             </div>
         </div>
     </div>
@@ -117,67 +122,85 @@
 
 <script>
     const CHUNK_SIZE = 2500;
-    const STORAGE_KEY = "gemini_safe_book_v2";
+    const STORAGE_KEY = "gemini_smart_book";
     let state = { chunks: [], currentIndex: 0, isTranslating: false };
 
-    // --- 1. 저장 시스템 (오프라인 감지 기능 추가) ---
+    // --- 0. 스마트 팝업 연동 시스템 (핵심) ---
+    
+    // 메시지 수신 리스너 (팝업에서 보낸 텍스트 받기)
+    window.addEventListener('message', function(event) {
+        // 보안상 데이터 타입 확인
+        if (event.data && event.data.type === 'NOVEL_TEXT') {
+            const text = event.data.text;
+            if(!text) return;
+            
+            console.log("텍스트 수신 완료!");
+            
+            // 1. 입력창에 채우기
+            document.getElementById('inputArea').value = text;
+            
+            // 2. 소제목 자동 생성 (현재 시간 or 순서)
+            const count = document.querySelectorAll('.episode-title').length + 1;
+            document.getElementById('episodeTitle').value = `제${count}화 (자동 수신됨)`;
+
+            // 3. 번역 즉시 시작 (원클릭 효과)
+            manualStart();
+            
+            // 4. 알림
+            updateStatus("⚡ 팝업 데이터 수신! 번역 시작", false);
+        }
+    });
+
+    // 팝업 열기 함수
+    function openPopup() {
+        const url = document.getElementById('urlInput').value.trim();
+        if(!url) return alert("URL을 입력하세요.");
+        
+        // 팝업 창 크기와 위치 지정 (오른쪽 절반)
+        const w = 600;
+        const h = 800;
+        const left = window.screen.width - w;
+        const top = 0;
+        
+        window.open(url, 'TargetWindow', `width=${w},height=${h},top=${top},left=${left},scrollbars=yes,resizable=yes`);
+        
+        alert("팝업이 열리면, 그 창에서 '북마크'를 클릭하세요.\n그러면 자동으로 번역이 시작됩니다!");
+    }
+
+
+    // --- 1. 저장 시스템 ---
     function updateStatus(msg, isError) {
         const el = document.getElementById('saveStatus');
         el.innerText = msg;
-        if(isError) {
-            el.className = 'status-warn';
-            el.title = "오프라인 모드에서는 자동 저장이 안 될 수 있습니다. 수동으로 [백업]하세요.";
-        } else {
-            el.className = 'status-ok';
-            el.title = "브라우저에 안전하게 저장되었습니다.";
-        }
+        el.className = isError ? 'status-warn' : 'status-ok';
     }
 
-    // 초기 로드 시 테스트
     window.onload = function() {
         try {
-            // 저장소 테스트
-            localStorage.setItem("test_key", "ok");
-            localStorage.removeItem("test_key");
-            
-            // 데이터 복구 시도
             const saved = localStorage.getItem(STORAGE_KEY);
             if (saved && saved.trim().length > 0) {
                 document.getElementById('contentArea').innerHTML = saved;
                 const msg = document.getElementById('emptyMsg');
                 if(msg) msg.remove();
-                updateStatus("✅ 복구 완료", false);
-            } else {
-                updateStatus("✅ 저장 준비됨", false);
+                updateStatus("✅ 복구됨", false);
             }
-        } catch(e) {
-            // 오프라인(file://) 등에서 에러 발생 시
-            console.error("Storage Error:", e);
-            updateStatus("⚠️ 자동저장 불가 (수동백업 요망)", true);
-        }
+        } catch(e) { updateStatus("⚠️ 오프라인 모드", true); }
     };
 
     function autoSave() {
         const content = document.getElementById('contentArea').innerHTML;
-        try {
-            localStorage.setItem(STORAGE_KEY, content);
-            updateStatus("💾 저장됨 " + new Date().toLocaleTimeString(), false);
-        } catch(e) {
-            updateStatus("⚠️ 저장 실패! [💾 백업] 누르세요", true);
-        }
+        try { localStorage.setItem(STORAGE_KEY, content); updateStatus("💾 저장됨", false); } 
+        catch(e) { updateStatus("⚠️ 저장 불가", true); }
     }
 
     function exportData() {
         const content = document.getElementById('contentArea').innerHTML;
-        if(!content || content.includes("데이터가 비어있습니다")) return alert("저장할 내용이 없습니다.");
-
-        const title = "번역백업_" + new Date().toISOString().slice(0,10);
-        const html = `<!DOCTYPE html><html lang="ko"><body><div id="backup-data">${content}</div></body></html>`;
-        const blob = new Blob([html], {type: "text/html"});
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = `${title}.html`;
-        link.click();
+        if(!content || content.includes("스마트 연동")) return alert("내용 없음");
+        const blob = new Blob([`<!DOCTYPE html><html><body><div id="backup">${content}</div></body></html>`], {type: "text/html"});
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `Book_${new Date().toISOString().slice(0,10)}.html`;
+        a.click();
     }
 
     function importData(input) {
@@ -185,33 +208,19 @@
         if(!file) return;
         const reader = new FileReader();
         reader.onload = function(e) {
-            const text = e.target.result;
             const parser = new DOMParser();
-            const doc = parser.parseFromString(text, "text/html");
-            
-            let newContent = "";
-            const backupDiv = doc.getElementById('backup-data');
-            const contentDiv = doc.getElementById('contentArea');
-
-            if(backupDiv) newContent = backupDiv.innerHTML;
-            else if(contentDiv) newContent = contentDiv.innerHTML;
-            else newContent = doc.body.innerHTML;
-
-            if(newContent) {
-                document.getElementById('contentArea').innerHTML = newContent;
-                autoSave(); // 불러온 뒤 저장 시도
-                alert("✅ 데이터 복구 완료!");
-            } else {
-                alert("⚠️ 파일 형식을 확인할 수 없습니다.");
-            }
+            const doc = parser.parseFromString(e.target.result, "text/html");
+            const backup = doc.getElementById('backup') || doc.getElementById('contentArea') || doc.body;
+            document.getElementById('contentArea').innerHTML = backup.innerHTML;
+            autoSave();
+            alert("복구 완료");
         };
         reader.readAsText(file);
-        input.value = '';
     }
 
     function resetBook() {
-        if(confirm("모든 데이터를 삭제하시겠습니까?")) {
-            try { localStorage.removeItem(STORAGE_KEY); } catch(e){}
+        if(confirm("초기화 하시겠습니까?")) {
+            localStorage.removeItem(STORAGE_KEY);
             location.reload();
         }
     }
@@ -220,7 +229,7 @@
     async function fetchModels() {
         const key = document.getElementById('apiKeyInput').value.trim();
         const select = document.getElementById('modelSelect');
-        if(!key) return alert("API 키 입력 필요");
+        if(!key) return alert("키 입력 필요");
         select.innerHTML = "<option>...</option>";
         try {
             const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
@@ -234,23 +243,23 @@
                     if(opt.value.includes("flash")) opt.selected = true;
                     select.appendChild(opt);
                 });
-            alert("✅ 준비됨");
-        } catch(e) { alert("실패: "+e.message); select.innerHTML="<option>실패</option>"; }
+            alert("✅ 모델 준비됨");
+        } catch(e) { alert("오류: "+e.message); select.innerHTML="<option>실패</option>"; }
     }
 
-    function startTranslation() {
+    function manualStart() {
         const key = document.getElementById('apiKeyInput').value.trim();
         const model = document.getElementById('modelSelect').value;
         const text = document.getElementById('inputArea').value;
         const title = document.getElementById('episodeTitle').value;
 
         if(!key || model.includes("검색")) return alert("1. 모델 검색 필요");
-        if(!text.trim()) return alert("본문 입력 필요");
+        if(!text.trim()) return alert("본문이 비어있습니다.");
 
         const msg = document.getElementById('emptyMsg');
         if(msg) msg.remove();
 
-        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('manualBtn').style.display = 'none';
         document.getElementById('stopBtn').style.display = 'inline-block';
         state.isTranslating = true;
         state.currentIndex = 0;
@@ -308,7 +317,6 @@
             contentArea.appendChild(div);
             
             autoSave();
-
             state.currentIndex++;
             if(state.isTranslating) setTimeout(() => processQueue(key, model), 1000);
         } catch(e) {
@@ -321,21 +329,23 @@
         state.isTranslating = false;
         document.getElementById('progressBar').style.width = "0%";
         document.getElementById('stopBtn').style.display = 'none';
-        document.getElementById('startBtn').style.display = 'inline-block';
+        document.getElementById('manualBtn').style.display = 'inline-block';
         document.getElementById('inputArea').value = "";
         document.getElementById('episodeTitle').value = "";
-        alert("완료!");
+        
+        // 팝업 닫기 시도 (북마크릿에서 안 닫혔을 경우)
+        // window.close()는 스크립트로 연 창만 닫을 수 있음.
     }
 
     function stopBatch() {
         state.isTranslating = false;
         document.getElementById('stopBtn').style.display = 'none';
-        document.getElementById('startBtn').style.display = 'inline-block';
+        document.getElementById('manualBtn').style.display = 'inline-block';
         alert("중지됨");
     }
 
     function printToPdf() {
-        if(document.getElementById('contentArea').innerText.trim().length < 10) return alert("내용이 없습니다.");
+        if(document.getElementById('contentArea').innerText.length < 10) return alert("내용 없음");
         window.print();
     }
 </script>
