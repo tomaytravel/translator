@@ -8,28 +8,21 @@
         :root { --bg: #f5f5f7; --paper: #fff; --text: #333; --primary: #007aff; --danger: #ff3b30; }
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Pretendard", sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
         
-        /* [핵심] 인쇄/PDF 저장용 스타일 */
+        /* 인쇄/PDF 저장용 스타일 */
         @media print {
             @page { size: A4; margin: 20mm; }
             body { background: white; height: auto; display: block; overflow: visible; }
-            
-            /* UI 숨김 */
             header, #setupBox, #progressBarContainer, ::-webkit-scrollbar { display: none !important; }
-            
             #readerContainer { padding: 0; display: block; overflow: visible; height: auto; }
             #paper { box-shadow: none; width: 100%; max-width: 100%; padding: 0; margin: 0; border: none; min-height: 0; }
-            
-            /* 본문 폰트 조정 */
             .novel-text { font-size: 11pt; line-height: 1.8; color: black; text-align: justify; }
-            
-            /* 페이지 넘김 설정 */
             .episode-title { page-break-before: always; margin-top: 0 !important; padding-top: 50px; }
             
-            /* [수정됨] 완료 구분선: 텍스트는 숨기고 점선만 남김 */
+            /* 완료 구분선: PDF에서는 점선만 남김 */
             .episode-end { 
-                color: transparent !important; /* 글자 투명화 */
-                font-size: 0 !important;       /* 글자 공간 삭제 */
-                border-top: 1px dashed #ccc !important; /* 점선은 유지 */
+                color: transparent !important; 
+                font-size: 0 !important;       
+                border-top: 1px dashed #ccc !important; 
                 margin: 50px 0 !important; 
                 padding: 0 !important;
                 height: 1px;
@@ -80,7 +73,6 @@
             color: #1d1d1f; border-bottom: 2px solid #1d1d1f; padding-bottom: 15px; 
         }
         
-        /* 화면용 구분선 스타일 */
         .episode-end { 
             text-align: center; margin: 60px 0; color: #aaa; font-size: 13px; 
             border-top: 2px dashed #eee; padding-top: 20px; 
@@ -128,7 +120,7 @@
         <div id="setupBox">
             <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
                 <h3 style="margin:0; font-size:16px; color:#333;">📋 빠른 시작</h3>
-                <span style="font-size:12px; color:#007aff; font-weight:bold;">새 탭에서 북마크를 누르면 이 창으로 돌아옵니다!</span>
+                <span style="font-size:12px; color:#007aff; font-weight:bold;">새 탭에서 북마크를 누르면 자동 번역됩니다</span>
             </div>
             <input type="text" id="episodeTitle" placeholder="소제목 (예: 제1화)" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #d2d2d7; border-radius:6px; box-sizing:border-box; font-weight:bold;">
             <textarea id="inputArea" placeholder="수동으로 붙여넣고 싶다면 여기에..."></textarea>
@@ -153,14 +145,20 @@
     const STORAGE_KEY = "gemini_smart_tab_book";
     let state = { chunks: [], currentIndex: 0, isTranslating: false };
 
-    // --- 스마트 연동 ---
+    // --- 스마트 연동 (제목 수정됨) ---
     window.addEventListener('message', function(event) {
         if (event.data && event.data.type === 'NOVEL_TEXT') {
             const text = event.data.text;
             if(!text) return;
+            
+            // 본문 채우기
             document.getElementById('inputArea').value = text;
+            
+            // 제목 자동 생성 (군더더기 없이 숫자만)
             const count = document.querySelectorAll('.episode-title').length + 1;
-            document.getElementById('episodeTitle').value = `제${count}화 (수신됨)`;
+            document.getElementById('episodeTitle').value = `제${count}화`; 
+
+            // 번역 시작
             manualStart();
             updateStatus("⚡ 데이터 수신! 번역 시작", false);
         }
@@ -172,7 +170,7 @@
         window.open(url, '_blank');
     }
 
-    // --- 저장 시스템 ---
+    // --- 기본 기능 ---
     function updateStatus(msg, isError) {
         const el = document.getElementById('saveStatus');
         el.innerText = msg;
@@ -336,17 +334,13 @@
         document.getElementById('inputArea').value = "";
         document.getElementById('episodeTitle').value = "";
         
-        // 1. 완료 구분선 추가
         const endMarker = document.createElement("div");
         endMarker.className = "episode-end";
-        endMarker.innerText = "✨ 번역 완료 ✨"; // PDF에서는 숨김, 화면에선 보임
+        endMarker.innerText = "✨ 번역 완료 ✨"; 
         document.getElementById('contentArea').appendChild(endMarker);
         
         window.scrollTo(0, document.body.scrollHeight);
-
         autoSave();
-
-        // 3. 완료 알림
         alert("✅ 번역이 완료되었습니다!\n다음 화를 가져오세요.");
     }
 
