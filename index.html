@@ -1,360 +1,292 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini Smart Tab Reader</title>
-    <style>
-        :root { --bg: #f5f5f7; --paper: #fff; --text: #333; --primary: #007aff; --danger: #ff3b30; }
-        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Pretendard", sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+let isAutoMode = false;
+let nextUrl = "";
+let targetTabId = null;
+let autoTimer = null;
+
+// 1. 초기 설정 및 복구
+chrome.storage.local.get(['geminiKey', 'savedContent'], (res) => {
+    if(res.geminiKey) document.getElementById('apiKey').value = res.geminiKey;
+    if(res.savedContent) {
+        document.getElementById('content').innerHTML = res.savedContent;
+        setTimeout(() => window.scrollTo(0, document.body.scrollHeight), 100);
+        updateStatus("💾 이전 작업 내용 복구됨");
+    }
+});
+
+document.getElementById('apiKey').addEventListener('change', (e) => {
+    chrome.storage.local.set({ geminiKey: e.target.value.trim() });
+});
+
+// UI 이벤트 연결
+document.getElementById('btnHelp').addEventListener('click', () => document.getElementById('help-modal').style.display = 'block');
+document.getElementById('btnCloseHelp').addEventListener('click', () => document.getElementById('help-modal').style.display = 'none');
+document.getElementById('btnFetch').addEventListener('click', () => fetchCurrentPage(false));
+
+document.getElementById('btnAuto').addEventListener('click', () => {
+    document.getElementById('manual-prompt').style.display = 'none';
+    isAutoMode = !isAutoMode;
+    const btn = document.getElementById('btnAuto');
+
+    if(isAutoMode) {
+        btn.innerText = "🛑 자동 주행 중지";
+        fetchCurrentPage(true);
+    } else {
+        stopAutoMode("⛔ 사용자가 정지함");
+    }
+});
+
+document.getElementById('btnResume').addEventListener('click', () => {
+    document.getElementById('manual-prompt').style.display = 'none';
+    isAutoMode = true;
+    document.getElementById('btnAuto').innerText = "🛑 자동 주행 중지";
+    fetchCurrentPage(true); 
+});
+
+document.getElementById('btnSave').addEventListener('click', saveToFile);
+document.getElementById('btnPdf').addEventListener('click', saveToPDF); // PDF 기능 유지
+document.getElementById('btnClear').addEventListener('click', () => {
+    if(confirm("모든 번역 내용을 영구 삭제하시겠습니까?")) {
+        document.getElementById('content').innerHTML = "";
+        chrome.storage.local.remove('savedContent');
+        updateStatus("🗑️ 초기화 완료");
+    }
+});
+
+function stopAutoMode(msg = "🛑 자동 주행 중지") {
+    isAutoMode = false;
+    if(autoTimer) clearTimeout(autoTimer);
+    document.getElementById('btnAuto').innerText = "🚀 자동 주행 (Auto)";
+    updateStatus(msg);
+}
+
+// 유틸리티
+function splitText(text, size = 3500) {
+    const chunks = [];
+    for (let i = 0; i < text.length; i += size) {
+        chunks.push(text.substring(i, i + size));
+    }
+    return chunks;
+}
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function getBestModel(key) {
+    try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+        const data = await res.json();
+        const validModels = data.models?.filter(m => m.supportedGenerationMethods?.includes("generateContent"));
+        if (!validModels || validModels.length === 0) return "gemini-pro";
+
+        let best = validModels.find(m => m.name.includes("gemini-1.5-flash"));
+        if (!best) best = validModels.find(m => m.name.includes("gemini-1.5-pro"));
+        if (!best) best = validModels.find(m => m.name.includes("gemini-pro"));
         
-        /* 인쇄/PDF 저장용 스타일 */
-        @media print {
-            @page { size: A4; margin: 20mm; }
-            body { background: white; height: auto; display: block; overflow: visible; }
-            header, #setupBox, #progressBarContainer, ::-webkit-scrollbar { display: none !important; }
-            #readerContainer { padding: 0; display: block; overflow: visible; height: auto; }
-            #paper { box-shadow: none; width: 100%; max-width: 100%; padding: 0; margin: 0; border: none; min-height: 0; }
-            .novel-text { font-size: 11pt; line-height: 1.8; color: black; text-align: justify; }
-            .episode-title { page-break-before: always; margin-top: 0 !important; padding-top: 50px; }
-            
-            /* 완료 구분선: PDF에서는 점선만 남김 */
-            .episode-end { 
-                color: transparent !important; 
-                font-size: 0 !important;       
-                border-top: 1px dashed #ccc !important; 
-                margin: 50px 0 !important; 
-                padding: 0 !important;
-                height: 1px;
+        return best ? best.name.replace("models/", "") : "gemini-1.5-flash";
+    } catch (e) { return "gemini-1.5-flash"; }
+}
+
+// ------------------------------------------------------------------
+// 메인 로직
+// ------------------------------------------------------------------
+async function fetchCurrentPage(auto, retryCount = 0) {
+    if (auto && !isAutoMode) return;
+    const key = document.getElementById('apiKey').value.trim();
+    if(!key) return alert("API 키가 필요합니다.");
+
+    updateStatus("Step 1/4: 📡 원문 페이지 접속 중...");
+
+    try {
+        if (!targetTabId) {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            targetTabId = tab.id;
+        }
+
+        try { await chrome.tabs.get(targetTabId); } 
+        catch { throw new Error("소설 탭이 닫혔습니다."); }
+
+        // 1차 텍스트 확보
+        let response = await chrome.tabs.sendMessage(targetTabId, { action: "GET_TEXT" });
+        if(!response) throw new Error("응답 없음. 새로고침 하세요.");
+
+        // [핵심 기능] 페이지 로딩 안정화 체크 (덜 뜬 페이지 방지)
+        if (auto) {
+            let attempts = 0;
+            while (attempts < 3) { // 최대 3회(약 3초) 추가 확인
+                await wait(1000); // 1초 대기
+                const checkRes = await chrome.tabs.sendMessage(targetTabId, { action: "GET_TEXT" });
+                
+                // 1초 전보다 내용이 50자 이상 늘어났다면? -> 아직 로딩 중인 것임!
+                if (checkRes.text.length > response.text.length + 50) {
+                    updateStatus(`⏳ 추가 내용 로딩 중... (${response.text.length} -> ${checkRes.text.length}자)`);
+                    response = checkRes; // 더 긴 내용으로 갱신
+                    attempts = 0; // 로딩 중이면 카운트 리셋하고 더 기다림
+                } else {
+                    break; // 내용 변화 없으면 로딩 끝난 것으로 간주
+                }
+                attempts++;
             }
         }
 
-        header { 
-            flex-shrink: 0; background: rgba(255,255,255,0.95); backdrop-filter: blur(10px);
-            padding: 12px 20px; border-bottom: 1px solid #ddd; 
-            display: flex; align-items: center; gap: 8px; flex-wrap: wrap; z-index: 1000;
-        }
-        .brand { font-weight: 800; font-size: 1.2rem; margin-right: 10px; color: #1d1d1f; }
+        updateStatus(`Step 2/4: ✅ 원문 확보 완료 (${response.title.substring(0, 10)}... / ${response.text.length}자)`);
         
-        input, select { padding: 8px 10px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 13px; outline: none; }
-        input:focus { border-color: var(--primary); }
-        #apiKeyInput { width: 120px; }
-        #modelSelect { width: 160px; background: #f2f2f7; color: #007aff; font-weight: 600; }
-        #urlInput { flex-grow: 1; min-width: 150px; }
-
-        button { padding: 8px 12px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; color: white; background: var(--primary); font-size: 13px; transition: 0.2s; white-space: nowrap; }
-        button:hover { opacity: 0.9; }
-        
-        .btn-yellow { background: #ffcc00; color: #1d1d1f; }
-        .btn-red { background: var(--danger); }
-        .btn-green { background: #34c759; }
-        .btn-gray { background: #8e8e93; }
-        .btn-blue { background: #007aff; }
-
-        #loadFile { display: none; }
-
-        #readerContainer { 
-            flex: 1; overflow-y: auto; padding: 40px 20px; 
-            display: flex; flex-direction: column; align-items: center; 
-        }
-        #paper { 
-            width: 100%; max-width: 800px; background: var(--paper); padding: 70px; 
-            height: auto; min-height: calc(100% - 80px); 
-            box-shadow: 0 10px 30px rgba(0,0,0,0.08); border-radius: 12px; box-sizing: border-box; margin-bottom: 40px;
-        }
-        
-        #setupBox { background: #f9f9fa; padding: 25px; border-radius: 10px; margin-bottom: 50px; border: 1px solid #e5e5ea; }
-        #inputArea { width: 100%; height: 100px; padding: 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 14px; margin-bottom: 10px; outline: none; resize: vertical; background: #fff; box-sizing: border-box; }
-        
-        .novel-text { font-family: 'KoPub Batang', 'Batang', serif; font-size: 18px; line-height: 2.0; text-align: justify; color: #1d1d1f; word-break: keep-all; white-space: pre-wrap; }
-        
-        .episode-title { 
-            font-size: 1.6em; font-weight: bold; margin-top: 80px; margin-bottom: 40px; 
-            color: #1d1d1f; border-bottom: 2px solid #1d1d1f; padding-bottom: 15px; 
-        }
-        
-        .episode-end { 
-            text-align: center; margin: 60px 0; color: #aaa; font-size: 13px; 
-            border-top: 2px dashed #eee; padding-top: 20px; 
-        }
-
-        #progressBarContainer { position: fixed; top: 62px; left: 0; width: 100%; height: 3px; background: transparent; z-index: 90; pointer-events: none; }
-        #progressBar { height: 100%; background: #34c759; width: 0%; transition: width 0.3s; }
-        .typing-loader { display: inline-block; color: #86868b; font-size: 13px; margin: 20px 0; }
-        
-        #saveStatus { font-size: 11px; font-weight: bold; margin-left: auto; padding: 4px 8px; border-radius: 4px; }
-        .status-ok { color: #34c759; background: #e8faea; }
-        .status-warn { color: #ff3b30; background: #ffe5e5; }
-    </style>
-</head>
-<body>
-
-<header>
-    <div class="brand"><span>📚</span> SmartTab</div>
-    
-    <input type="password" id="apiKeyInput" placeholder="API Key" autocomplete="new-password">
-    <button class="btn-yellow" onclick="fetchModels()">1. 모델</button>
-    <select id="modelSelect"><option>◀ 검색</option></select>
-    
-    <div style="width:1px; height:20px; background:#e5e5ea; margin:0 5px;"></div>
-    
-    <input type="text" id="urlInput" placeholder="소설 URL 입력" value="https://kakuyomu.jp/works/4852201425154963487/episodes/4852201425154963490">
-    <button onclick="openTab()" class="btn-blue">🌏 새 탭으로 열기</button>
-    
-    <div style="width:1px; height:20px; background:#e5e5ea; margin:0 5px;"></div>
-
-    <input type="file" id="loadFile" accept=".html" onchange="importData(this)">
-    <button onclick="document.getElementById('loadFile').click()" class="btn-gray" title="백업 불러오기">📂</button>
-    <button onclick="exportData()" class="btn-gray" title="백업 저장하기">💾</button>
-    
-    <button onclick="printToPdf()" class="btn-green">🖨️ PDF</button>
-    <button onclick="resetBook()" class="btn-red">🗑️</button>
-
-    <div id="saveStatus" class="status-ok">대기</div>
-</header>
-
-<div id="progressBarContainer"><div id="progressBar"></div></div>
-
-<div id="readerContainer">
-    <div id="paper">
-        <div id="setupBox">
-            <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
-                <h3 style="margin:0; font-size:16px; color:#333;">📋 빠른 시작</h3>
-                <span style="font-size:12px; color:#007aff; font-weight:bold;">새 탭에서 북마크를 누르면 자동 번역됩니다</span>
-            </div>
-            <input type="text" id="episodeTitle" placeholder="소제목 (예: 제1화)" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #d2d2d7; border-radius:6px; box-sizing:border-box; font-weight:bold;">
-            <textarea id="inputArea" placeholder="수동으로 붙여넣고 싶다면 여기에..."></textarea>
-            <button onclick="manualStart()" id="manualBtn" style="margin-top:10px; width:100%;">수동 번역 시작</button>
-            <button onclick="stopBatch()" id="stopBtn" class="btn-red" style="display:none; margin-top:10px; width:100%;">중지</button>
-        </div>
-
-        <div id="contentArea" class="novel-text">
-            <div id="emptyMsg" style="text-align:center; color:#86868b; margin-top:50px;">
-                <div style="font-size:40px; margin-bottom:20px; opacity:0.3;">🚀</div>
-                <b>스마트 탭 연동 대기 중</b><br><br>
-                1. 상단의 <b>[🌏 새 탭으로 열기]</b> 버튼을 누르세요.<br>
-                2. 열린 탭에서 <b>북마크 버튼</b>을 누르세요.<br>
-                3. 탭이 닫히고 번역이 시작됩니다.
-            </div>
-        </div>
-    </div>
-</div>
-
-<script>
-    const CHUNK_SIZE = 2500;
-    const STORAGE_KEY = "gemini_smart_tab_book";
-    let state = { chunks: [], currentIndex: 0, isTranslating: false };
-
-    // --- 스마트 연동 (제목 수정됨) ---
-    window.addEventListener('message', function(event) {
-        if (event.data && event.data.type === 'NOVEL_TEXT') {
-            const text = event.data.text;
-            if(!text) return;
-            
-            // 본문 채우기
-            document.getElementById('inputArea').value = text;
-            
-            // 제목 자동 생성 (군더더기 없이 숫자만)
-            const count = document.querySelectorAll('.episode-title').length + 1;
-            document.getElementById('episodeTitle').value = `제${count}화`; 
-
-            // 번역 시작
-            manualStart();
-            updateStatus("⚡ 데이터 수신! 번역 시작", false);
-        }
-    });
-
-    function openTab() {
-        const url = document.getElementById('urlInput').value.trim();
-        if(!url) return alert("URL을 입력하세요.");
-        window.open(url, '_blank');
-    }
-
-    // --- 기본 기능 ---
-    function updateStatus(msg, isError) {
-        const el = document.getElementById('saveStatus');
-        el.innerText = msg;
-        el.className = isError ? 'status-warn' : 'status-ok';
-    }
-
-    window.onload = function() {
-        try {
-            const saved = localStorage.getItem(STORAGE_KEY);
-            if (saved && saved.trim().length > 0) {
-                document.getElementById('contentArea').innerHTML = saved;
-                const msg = document.getElementById('emptyMsg');
-                if(msg) msg.remove();
-                updateStatus("✅ 복구됨", false);
+        // 페이지 이동 실패(무한 로딩) 감지
+        const lastTitle = document.querySelector('.episode-box:last-child .ep-title');
+        if (auto && lastTitle && lastTitle.innerText === response.title) {
+            if (retryCount >= 5) { // 5회 재시도 후에도 제목이 같으면
+                updateStatus("⚠️ 페이지 이동 실패. 수동으로 이동해주세요.");
+                document.getElementById('manual-prompt').style.display = 'block';
+                stopAutoMode("⚠️ 이동 실패로 정지");
+                return; 
             }
-        } catch(e) { updateStatus("⚠️ 오프라인 모드", true); }
-    };
-
-    function autoSave() {
-        const content = document.getElementById('contentArea').innerHTML;
-        try { localStorage.setItem(STORAGE_KEY, content); updateStatus("💾 저장됨", false); } 
-        catch(e) { updateStatus("⚠️ 저장 불가", true); }
-    }
-
-    function exportData() {
-        const content = document.getElementById('contentArea').innerHTML;
-        if(!content || content.includes("스마트 탭")) return alert("내용 없음");
-        const blob = new Blob([`<!DOCTYPE html><html><body><div id="backup">${content}</div></body></html>`], {type: "text/html"});
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `Backup_${new Date().toISOString().slice(0,10)}.html`;
-        a.click();
-    }
-
-    function importData(input) {
-        const file = input.files[0];
-        if(!file) return;
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(e.target.result, "text/html");
-            const backup = doc.getElementById('backup') || doc.getElementById('contentArea') || doc.body;
-            document.getElementById('contentArea').innerHTML = backup.innerHTML;
-            autoSave();
-            alert("복구 완료");
-        };
-        reader.readAsText(file);
-    }
-
-    function resetBook() {
-        if(confirm("초기화 하시겠습니까?")) {
-            localStorage.removeItem(STORAGE_KEY);
-            location.reload();
+            updateStatus(`⏳ 페이지 이동 대기 중... (${retryCount + 1}/5)`);
+            await wait(2000);
+            if(!isAutoMode) return;
+            return fetchCurrentPage(true, retryCount + 1); 
         }
+
+        nextUrl = response.nextUrl; 
+
+        updateStatus("Step 3/4: 🤖 번역 모델 연결 중...");
+        const modelName = await getBestModel(key);
+        if(auto && !isAutoMode) return;
+
+        await processTranslation(key, response.text, response.title, auto, modelName);
+
+    } catch(e) {
+        updateStatus("⚠️ " + e.message);
+        stopAutoMode("⚠️ 오류로 인한 정지");
     }
+}
 
-    async function fetchModels() {
-        const key = document.getElementById('apiKeyInput').value.trim();
-        const select = document.getElementById('modelSelect');
-        if(!key) return alert("키 입력 필요");
-        select.innerHTML = "<option>...</option>";
-        try {
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
-            const data = await res.json();
-            select.innerHTML = "";
-            data.models.filter(m => m.name.includes("gemini") && m.supportedGenerationMethods.includes("generateContent"))
-                .forEach(m => {
-                    const opt = document.createElement("option");
-                    opt.value = m.name.replace("models/", "");
-                    opt.innerText = opt.value;
-                    if(opt.value.includes("flash")) opt.selected = true;
-                    select.appendChild(opt);
-                });
-            alert("✅ 모델 준비됨");
-        } catch(e) { alert("오류: "+e.message); select.innerHTML="<option>실패</option>"; }
-    }
+async function processTranslation(key, fullText, title, auto, modelName) {
+    if(auto && !isAutoMode) return;
 
-    function manualStart() {
-        const key = document.getElementById('apiKeyInput').value.trim();
-        const model = document.getElementById('modelSelect').value;
-        const text = document.getElementById('inputArea').value;
-        const title = document.getElementById('episodeTitle').value;
+    const contentDiv = document.getElementById('content');
+    if(contentDiv.innerText.includes("왼쪽의 소설")) contentDiv.innerHTML = "";
 
-        if(!key || model.includes("검색")) return alert("1. 모델 검색 필요");
-        if(!text.trim()) return alert("본문이 비어있습니다.");
+    const box = document.createElement("div");
+    box.className = "episode-box";
+    const titleDiv = document.createElement("div");
+    titleDiv.className = "ep-title";
+    titleDiv.innerText = title;
+    box.appendChild(titleDiv);
+    contentDiv.appendChild(box);
 
-        const msg = document.getElementById('emptyMsg');
-        if(msg) msg.remove();
+    const chunks = splitText(fullText, 3500);
+    
+    updateStatus(`Step 4/4: ⚡ 번역 시작 (총 ${chunks.length}구간)`);
 
-        document.getElementById('manualBtn').style.display = 'none';
-        document.getElementById('stopBtn').style.display = 'inline-block';
-        state.isTranslating = true;
-        state.currentIndex = 0;
-
-        const contentArea = document.getElementById('contentArea');
-        const titleHtml = `<div class='episode-title page-break'>${title || '새 에피소드'}</div>`;
-        const div = document.createElement("div");
-        div.innerHTML = titleHtml;
-        contentArea.appendChild(div);
-        autoSave();
-
-        const lines = text.split('\n');
-        let temp = "", list = [];
-        for(let line of lines) {
-            if(temp.length + line.length > CHUNK_SIZE) { list.push(temp); temp = line + "\n"; }
-            else { temp += line + "\n"; }
-        }
-        if(temp) list.push(temp);
-        state.chunks = list;
-
-        processQueue(key, model);
-    }
-
-    async function processQueue(key, model) {
-        if (!state.isTranslating) return;
-        if (state.currentIndex >= state.chunks.length) {
-            finishBatch();
+    for (let i = 0; i < chunks.length; i++) {
+        if (auto && !isAutoMode) {
+            updateStatus("⛔ 번역 중단됨");
             return;
         }
 
-        const chunk = state.chunks[state.currentIndex];
-        const contentArea = document.getElementById('contentArea');
+        const percent = Math.round(((i) / chunks.length) * 100);
+        updateStatus(`Step 4/4: ⏳ 번역 중... ${percent}% 완료 (${i+1}/${chunks.length} 구간)`);
+        
         const loader = document.createElement("div");
-        loader.className = "typing-loader";
-        loader.innerText = `✨ 번역 중... (${state.currentIndex + 1}/${state.chunks.length})`;
-        contentArea.appendChild(loader);
+        loader.className = "loading";
+        loader.innerHTML = `<b>${percent}%</b> 진행 중...<br><span style="font-size:0.8em">(${i+1}/${chunks.length} 구간)</span>`;
+        box.appendChild(loader);
         
         window.scrollTo(0, document.body.scrollHeight);
-        document.getElementById('progressBar').style.width = `${((state.currentIndex)/state.chunks.length)*100}%`;
 
         try {
-            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
-                method: "POST", headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: 
-                    `당신은 문학 전문 번역가입니다. 한국어로 번역하세요.\n[원칙]\n1. 문학적 완성도(리듬, 정서)\n2. 화자 톤 유지\n3. 주석 금지\n\n${chunk}` 
-                }] }] })
-            });
-            const data = await res.json();
-            if(data.error) throw new Error(data.error.message);
-            
+            const translatedText = await callGeminiApi(key, chunks[i], modelName);
             loader.remove();
-            const div = document.createElement("div");
-            div.innerText = data.candidates[0].content.parts[0].text;
-            div.style.marginBottom = "20px";
-            contentArea.appendChild(div);
-            
-            autoSave();
-            state.currentIndex++;
-            if(state.isTranslating) setTimeout(() => processQueue(key, model), 1000);
-        } catch(e) {
-            loader.innerText = "오류 재시도...";
-            setTimeout(() => processQueue(key, model), 3000);
+            const p = document.createElement("div");
+            p.innerHTML = translatedText.replace(/\n/g, '<br>');
+            box.appendChild(p);
+
+            chrome.storage.local.set({ savedContent: contentDiv.innerHTML }); // 실시간 저장
+
+        } catch (e) {
+            loader.innerHTML = `❌ 오류: ${e.message}`;
+            loader.style.color = "red";
+            stopAutoMode("⚠️ 번역 실패로 정지");
+            return; 
         }
     }
 
-    function finishBatch() {
-        state.isTranslating = false;
-        document.getElementById('progressBar').style.width = "0%";
-        document.getElementById('stopBtn').style.display = 'none';
-        document.getElementById('manualBtn').style.display = 'inline-block';
-        document.getElementById('inputArea').value = "";
-        document.getElementById('episodeTitle').value = "";
-        
-        const endMarker = document.createElement("div");
-        endMarker.className = "episode-end";
-        endMarker.innerText = "✨ 번역 완료 ✨"; 
-        document.getElementById('contentArea').appendChild(endMarker);
-        
-        window.scrollTo(0, document.body.scrollHeight);
-        autoSave();
-        alert("✅ 번역이 완료되었습니다!\n다음 화를 가져오세요.");
-    }
+    updateStatus("✅ 번역 100% 완료!");
+    chrome.storage.local.set({ savedContent: contentDiv.innerHTML });
+    
+    await wait(1000);
+    window.scrollTo(0, document.body.scrollHeight);
 
-    function stopBatch() {
-        state.isTranslating = false;
-        document.getElementById('stopBtn').style.display = 'none';
-        document.getElementById('manualBtn').style.display = 'inline-block';
-        alert("중지됨");
+    if(auto) {
+        if(!isAutoMode) return;
+        if(nextUrl) {
+            updateStatus("🚀 3초 후 다음 화로 이동...");
+            autoTimer = setTimeout(async () => {
+                if(!isAutoMode) return; 
+                await chrome.tabs.update(targetTabId, { url: nextUrl });
+                updateStatus("📄 새 페이지 로딩 대기...");
+                autoTimer = setTimeout(() => fetchCurrentPage(true), 5000); 
+            }, 3000);
+        } else {
+            updateStatus("⚠️ 다음 화 버튼 없음");
+            document.getElementById('manual-prompt').style.display = 'block';
+            stopAutoMode("⚠️ 링크 없음");
+        }
     }
+}
 
-    function printToPdf() {
-        if(document.getElementById('contentArea').innerText.length < 10) return alert("내용 없음");
-        window.print();
-    }
-</script>
-</body>
-</html>
+async function callGeminiApi(key, text, modelName) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+    const response = await fetch(url, {
+        method: "POST", 
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: 
+            `당신은 소설 번역가입니다. 다음 텍스트를 이어지는 내용으로 자연스럽게 한국어로 번역하세요. 주석 금지.\n\n${text}` 
+        }] }] })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || "API 오류");
+    return data.candidates[0].content.parts[0].text;
+}
+
+// ------------------------------------------------------------------
+// 저장 및 PDF 출력 기능
+// ------------------------------------------------------------------
+function saveToFile() {
+    const content = document.getElementById('content').innerHTML;
+    if(!content || content.includes("왼쪽의 소설")) return alert("저장할 내용이 없습니다.");
+    
+    const date = new Date().toISOString().slice(0, 10);
+    const htmlContent = `
+        <!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>번역 소설</title>
+        <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap" rel="stylesheet">
+        <style>
+            body { max-width: 800px; margin: 0 auto; padding: 40px; font-family: 'Noto Serif KR', serif; line-height: 2.0; font-size: 18px; background: #fdfbf7; color: #333; }
+            .ep-title { font-size: 1.6em; font-weight: bold; border-bottom: 2px solid #555; margin-top: 60px; margin-bottom: 30px; }
+            .loading { display: none; }
+        </style></head><body>${content}</body></html>`;
+
+    const blob = new Blob([htmlContent], {type: "text/html"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `Novel_Translation_${date}.html`;
+    a.click();
+}
+
+function saveToPDF() {
+    const content = document.getElementById('content').innerHTML;
+    if(!content || content.includes("왼쪽의 소설")) return alert("내용 없음");
+    const printWindow = window.open('', '', 'width=900,height=800');
+    printWindow.document.write(`
+        <!DOCTYPE html><html lang="ko"><head><title>PDF 저장</title>
+        <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap" rel="stylesheet">
+        <style>
+            @page { margin: 20mm; }
+            body { font-family: 'Noto Serif KR', serif; line-height: 1.8; font-size: 14pt; }
+            .ep-title { font-size: 1.8em; font-weight: bold; border-bottom: 2px solid #000; margin-top: 50px; margin-bottom: 30px; page-break-after: avoid; }
+            .loading { display: none; }
+        </style></head><body>${content}</body></html>`);
+    printWindow.document.close();
+    printWindow.onload = function() { printWindow.focus(); printWindow.print(); };
+}
+
+function updateStatus(msg) {
+    document.getElementById('status').innerText = msg;
+}
